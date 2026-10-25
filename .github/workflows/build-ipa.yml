@@ -1,0 +1,59 @@
+name: Build unsigned IPA
+
+# An unsigned VLC-iOS IPA for installing into LiveContainer (which signs it).
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  ipa:
+    runs-on: xcode-27
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks | grep -i iphoneos
+          pod --version || sudo gem install cocoapods
+
+      # The official bundle identifier, so the app replaces an existing VLC in LiveContainer.
+      - name: Bundle identifier
+        run: sed -i '' 's/^BUNDLE_IDENTIFIER_PREFIX=.*/BUNDLE_IDENTIFIER_PREFIX=org.videolan/' Buildsystem/SharedConfig.xcconfig
+
+      - name: Pods
+        run: set -o pipefail; pod install --repo-update 2>&1 | tee pods.log || { tail -30 pods.log | sed 's/^/::error::/'; exit 1; }
+
+      - name: Swift packages
+        run: |
+          xcodebuild -resolvePackageDependencies -workspace VLC.xcworkspace -scheme VLC-iOS-no-watch 2>&1 | tee spm.log
+          [ "${PIPESTATUS[0]}" = 0 ] || { grep -iE "error" spm.log | head -20 | sed 's/^/::error::/'; exit 1; }
+
+      - name: Build
+        run: |
+          set -o pipefail
+          xcodebuild build -workspace VLC.xcworkspace -scheme VLC-iOS-no-watch -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" \
+            2>&1 | tee build.log | grep -E "error:|warning: .*deprecated.*|\*\* BUILD" || true
+          grep -q "\*\* BUILD SUCCEEDED \*\*" build.log || { grep -E "error:" build.log | sort -u | head -40 | sed 's/^/::error::/'; exit 1; }
+
+      - name: Package
+        run: |
+          app=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" | head -1)
+          [ -n "$app" ] || { echo "::error::no .app was built"; exit 1; }
+          mkdir -p Payload && cp -R "$app" Payload/
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' -c 'Print :CFBundleShortVersionString' -c 'Print :DTSDKName' "Payload/$(basename "$app")/Info.plist"
+          zip -qry VLC-iOS-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VLC-iOS-unsigned.ipa
+          path: VLC-iOS-unsigned.ipa
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: build-log
+          path: build.log
