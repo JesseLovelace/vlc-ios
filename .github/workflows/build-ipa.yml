@@ -22,6 +22,15 @@ jobs:
       - name: Bundle identifier
         run: sed -i '' 's/^BUNDLE_IDENTIFIER_PREFIX=.*/BUNDLE_IDENTIFIER_PREFIX=org.videolan/' Buildsystem/SharedConfig.xcconfig
 
+      # Xcode 27 builds for iOS 15 and later only; targets below that are raised to 15.0
+      # (targets that already ask for more, like the widget, keep theirs).
+      - name: Deployment targets
+        run: |
+          sed -i '' -E 's/IPHONEOS_DEPLOYMENT_TARGET = (9|1[0-4])(\.[0-9]+)?;/IPHONEOS_DEPLOYMENT_TARGET = 15.0;/' VLC.xcodeproj/project.pbxproj
+          sed -i '' -E "s/(platform :ios, |IPHONEOS_DEPLOYMENT_TARGET'\] = )'1[0-4](\.[0-9]+)?'/\1'15.0'/" Podfile
+          grep -o "IPHONEOS_DEPLOYMENT_TARGET = [0-9.]*;" VLC.xcodeproj/project.pbxproj | sort | uniq -c
+          grep -n "15.0" Podfile
+
       - name: Pods
         run: set -o pipefail; pod install --repo-update 2>&1 | tee pods.log || { tail -30 pods.log | sed 's/^/::error::/'; exit 1; }
 
@@ -30,13 +39,12 @@ jobs:
           xcodebuild -resolvePackageDependencies -workspace VLC.xcworkspace -scheme VLC-iOS-no-watch 2>&1 | tee spm.log
           [ "${PIPESTATUS[0]}" = 0 ] || { grep -iE "error" spm.log | head -20 | sed 's/^/::error::/'; exit 1; }
 
-      # Xcode 27 builds for iOS 15 and later only; the project and its pods still say 12.0.
       - name: Build
         run: |
           set -o pipefail
           xcodebuild build -workspace VLC.xcworkspace -scheme VLC-iOS-no-watch -configuration Release \
             -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
-            IPHONEOS_DEPLOYMENT_TARGET=15.0 CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM="" \
             2>&1 | tee build.log | grep -E "error:|warning: .*deprecated.*|\*\* BUILD" || true
           grep -q "\*\* BUILD SUCCEEDED \*\*" build.log || { grep -E "error:" build.log | sort -u | head -40 | sed 's/^/::error::/'; exit 1; }
 
